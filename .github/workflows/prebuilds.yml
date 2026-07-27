@@ -6,6 +6,9 @@ on:
         type: boolean
       upload-assets:
         type: boolean
+      release-ref:
+        type: string
+        default: ${{ github.ref_name }}
 
 permissions:
   contents: read
@@ -17,62 +20,102 @@ jobs:
       (matrix.os == 'macos' && 'macos-15') ||
       (matrix.os == 'windows' && 'windows-2025') }}
     container:
-      image: ${{ matrix.os == 'linux' && 'debian:11-slim' || null }}
+      image: ${{ (matrix.os == 'linux' && matrix.libc == 'musl' && matrix.cross == '' && 'alpine:3.22') || (matrix.os == 'linux' && matrix.libc == '' && 'debian:13-slim') || null }}
     strategy:
+      fail-fast: false
       matrix:
         os: [linux, macos, windows]
         cross: ['']
+        libc: ['']
         include:
           - { os: windows, cross: ia32 }
+          - { os: linux, libc: musl }
+          - { os: linux, cross: arm64, libc: musl }
+          - { os: windows, cross: arm64 }
     outputs:
       hash-linux: ${{ steps.output.outputs.hash-linux }}
       hash-macos: ${{ steps.output.outputs.hash-macos }}
       hash-windows: ${{ steps.output.outputs.hash-windows }}
       hash-windows-ia32: ${{ steps.output.outputs.hash-windows-ia32 }}
+      hash-linux-musl: ${{ steps.output.outputs.hash-linux-musl }}
+      hash-linux-musl-arm64: ${{ steps.output.outputs.hash-linux-musl-arm64 }}
+      hash-windows-arm64: ${{ steps.output.outputs.hash-windows-arm64 }}
       id-linux: ${{ steps.output.outputs.id-linux }}
       id-macos: ${{ steps.output.outputs.id-macos }}
       id-windows: ${{ steps.output.outputs.id-windows }}
       id-windows-ia32: ${{ steps.output.outputs.id-windows-ia32 }}
+      id-linux-musl: ${{ steps.output.outputs.id-linux-musl }}
+      id-linux-musl-arm64: ${{ steps.output.outputs.id-linux-musl-arm64 }}
+      id-windows-arm64: ${{ steps.output.outputs.id-windows-arm64 }}
     env:
       JOBS: 3
     steps:
-      - name: Install system dependencies
+      - name: Install system dependencies (Debian)
         run: apt-get update && apt-get -y install g++ g++-aarch64-linux-gnu g++-arm-linux-gnueabihf git jq make python3
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.libc == ''
+      - name: Install system dependencies (Alpine)
+        run: apk add --no-cache bash build-base curl git jq make musl-dev nodejs npm openssl python3 tar
+        if: runner.os == 'Linux' && matrix.libc == 'musl' && matrix.cross == ''
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: recursive
       - uses: ./.github/actions/setup
+        if: matrix.libc != 'musl'
+      - name: Install npm deps (Alpine)
+        if: runner.os == 'Linux' && matrix.libc == 'musl' && matrix.cross == ''
+        run: npm ci --ignore-scripts
       - name: Build ${{ (runner.arch == 'ARM64' && 'arm64') || 'x64' }}
         run: bash .github/prebuild.sh
-        if: matrix.cross == ''
+        if: matrix.cross == '' && matrix.libc == ''
+      - name: Build native (musl)
+        run: bash .github/prebuild.sh '' musl
+        if: matrix.cross == '' && matrix.libc == 'musl'
       - name: Build arm cross
         run: bash .github/prebuild.sh arm
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.libc == ''
         env:
           CC: arm-linux-gnueabihf-gcc
           CXX: arm-linux-gnueabihf-g++
       - name: Build arm64 cross
         run: bash .github/prebuild.sh arm64
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.libc == ''
         env:
           CC: aarch64-linux-gnu-gcc
           CXX: aarch64-linux-gnu-g++
+      - name: Build musl arm64 cross (dockcross)
+        run: |
+          docker pull dockcross/linux-arm64-musl
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -e JOBS=3 \
+            dockcross/linux-arm64-musl \
+            bash -c '
+              apt-get update -qq && apt-get install -y -qq curl git jq python3 tar gzip
+              curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+              apt-get install -y -qq nodejs
+              npm ci --ignore-scripts
+              bash .github/prebuild.sh arm64 musl
+            '
+        if: runner.os == 'Linux' && matrix.libc == 'musl' && matrix.cross == 'arm64'
       - name: Build ia32 cross
         run: bash .github/prebuild.sh ia32
         if: matrix.cross == 'ia32'
+      - name: Build Windows arm64 cross
+        run: bash .github/prebuild.sh arm64
+        if: matrix.cross == 'arm64' && runner.os == 'Windows'
       - name: Build x64 cross
         run: bash .github/prebuild.sh x64
         if: runner.os == 'macOS'
       - id: upload
         name: Upload prebuilds
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: prebuilds-${{ matrix.os }}${{ matrix.cross != '' && '-' || '' }}${{ matrix.cross }}
+          name: prebuilds-${{ matrix.os }}${{ matrix.libc != '' && format('-{0}', matrix.libc) || '' }}${{ matrix.cross != '' && format('-{0}', matrix.cross) || '' }}
           path: prebuilds/
       - id: output
         run: |
-          suffix='${{ matrix.os }}${{ matrix.cross != '' && '-' || '' }}${{ matrix.cross }}'
+          suffix='${{ matrix.os }}${{ matrix.libc != '' && format('-{0}', matrix.libc) || '' }}${{ matrix.cross != '' && format('-{0}', matrix.cross) || '' }}'
           echo "hash-${suffix}=$(openssl sha256 -r * | tr '*' ' ' | jq -Rrs @base64)" >> "$GITHUB_OUTPUT"
           echo "id-${suffix}=${{ steps.upload.outputs.artifact-id }}" >> "$GITHUB_OUTPUT"
         shell: bash
@@ -95,7 +138,7 @@ jobs:
           artifact-ids: ${{ steps.artifacts.outputs.ids }}
           merge-multiple: true
           path: prebuilds
-      - run: gh release upload '${{ github.ref_name }}' ./prebuilds/*.tar.gz
+      - run: gh release upload '${{ inputs.release-ref }}' ./prebuilds/*.tar.gz
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -135,6 +178,6 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.provenance.outputs.provenance-name }}
-      - run: gh release upload '${{ github.ref_name }}' '${{ needs.provenance.outputs.provenance-name }}'
+      - run: gh release upload '${{ inputs.release-ref }}' '${{ needs.provenance.outputs.provenance-name }}'
         env:
           GH_TOKEN: ${{ github.token }}

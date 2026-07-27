@@ -1,12 +1,12 @@
 // @ts-nocheck
 const childProcess = require('child_process');
 
-// Maximum defined symbol versions in Debian 10 / EL8
+// Maximum defined symbol versions in Debian 13
 const MAX_VERSIONS = {
-  CXXABI: [1, 3, 11],
+  CXXABI: [1, 3, 16],
   GCC: [7, 0, 0],
-  GLIBC: [2, 28, 0],
-  GLIBCXX: [3, 4, 25],
+  GLIBC: [2, 42, 0],
+  GLIBCXX: [3, 4, 34],
 };
 
 function cmpVersion(v1, v2) {

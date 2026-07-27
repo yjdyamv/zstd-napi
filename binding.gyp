@@ -30,7 +30,7 @@
       'cflags_cc!': ['-fno-exceptions'],
       'ldflags': [
         '-Wl,-z,noexecstack', '-Wl,-z,relro', '-Wl,-z,now',
-        '-Wl,--as-needed', '-Wl,--no-copy-dt-needed-entries',
+        '-Wl,--as-needed',
       ],
       'conditions': [
         ['OS=="mac"', {
